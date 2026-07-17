@@ -689,7 +689,7 @@ export function BeadStudio() {
         </section>
       )}
 
-      <footer><span>豆豆画室 · 为了快乐而做</span><span>无需登录 · 不上传图片</span></footer>
+      <footer><span>豆豆画室 · 为了快乐而做</span><span>打开即用 · 不上传图片</span></footer>
       {dragging && <div className="drop-overlay"><div><span>＋</span><b>松手就开始变豆豆</b></div></div>}
       {toast && <div className="toast" role="status">{toast}</div>}
     </main>
