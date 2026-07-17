@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
+    "build:cloudbase": "vite build --config vite.cloudbase.config.ts",
     "build:pages": "vite build --config vite.pages.config.ts",
     "start": "vinext start",
     "test": "vinext build && node --test tests/rendered-html.test.mjs",
