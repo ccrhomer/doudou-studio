@@ -111,6 +111,93 @@ function nearestColor(rgb: [number, number, number], indexes: number[]) {
   return best;
 }
 
+function colorDistance(lab: [number, number, number], paletteIndex: number) {
+  const target = PALETTE[paletteIndex].lab;
+  return (
+    Math.pow(lab[0] - target[0], 2) +
+    Math.pow(lab[1] - target[1], 2) +
+    Math.pow(lab[2] - target[2], 2)
+  );
+}
+
+function clampChannel(value: number) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function tuneRgb(rgb: [number, number, number], mode: Mode): [number, number, number] {
+  const luma = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
+  const saturation = mode === "cartoon" ? 1.3 : mode === "pixel" ? 1.14 : 1.08;
+  const contrast = mode === "cartoon" ? 1.14 : mode === "pixel" ? 1.18 : 1.07;
+  const brightness = mode === "photo" ? 3 : 0;
+  const tuned = rgb.map((channel) => {
+    const saturated = luma + (channel - luma) * saturation;
+    const contrasted = 128 + (saturated - 128) * contrast + brightness;
+    const value = mode === "cartoon" ? Math.round(contrasted / 18) * 18 : contrasted;
+    return clampChannel(value);
+  });
+  return tuned as [number, number, number];
+}
+
+function choosePreferredColors(
+  samples: Array<[number, number, number] | null>,
+  available: number[],
+  limit: number,
+  mode: Mode,
+) {
+  const amount = Math.min(limit, available.length);
+  if (amount >= available.length) return [...available];
+
+  const frequency = new Map<number, number>();
+  for (const rgb of samples) {
+    if (!rgb) continue;
+    const nearest = nearestColor(rgb, available);
+    frequency.set(nearest, (frequency.get(nearest) ?? 0) + 1);
+  }
+
+  if (mode !== "photo") {
+    return [...frequency.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, amount)
+      .map(([index]) => index);
+  }
+
+  const weightedSamples = samples.flatMap((rgb) => {
+    if (!rgb) return [];
+    const lab = rgbToLab(rgb);
+    const chroma = Math.sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
+    return [{ lab, weight: 1 + Math.min(1, chroma / 65) * 0.75 }];
+  });
+  if (!weightedSamples.length) return available.slice(0, amount);
+
+  const chosen: number[] = [];
+  const bestErrors = new Array(weightedSamples.length).fill(Number.POSITIVE_INFINITY);
+  while (chosen.length < amount) {
+    let bestCandidate = -1;
+    let bestScore = chosen.length ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY;
+    for (const candidate of available) {
+      if (chosen.includes(candidate)) continue;
+      let score = 0;
+      for (let i = 0; i < weightedSamples.length; i += 1) {
+        const distance = colorDistance(weightedSamples[i].lab, candidate);
+        score += chosen.length
+          ? Math.max(0, bestErrors[i] - distance) * weightedSamples[i].weight
+          : distance * weightedSamples[i].weight;
+      }
+      const isBetter = chosen.length ? score > bestScore : score < bestScore;
+      if (isBetter) {
+        bestScore = score;
+        bestCandidate = candidate;
+      }
+    }
+    if (bestCandidate < 0) break;
+    chosen.push(bestCandidate);
+    for (let i = 0; i < weightedSamples.length; i += 1) {
+      bestErrors[i] = Math.min(bestErrors[i], colorDistance(weightedSamples[i].lab, bestCandidate));
+    }
+  }
+  return chosen.length ? chosen : available.slice(0, amount);
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const href = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -148,8 +235,10 @@ export function BeadStudio() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const drawingRef = useRef(false);
+  const processRequestRef = useRef(0);
   const [sourceUrl, setSourceUrl] = useState("");
   const [sourceName, setSourceName] = useState("我的拼豆");
+  const [imageRevision, setImageRevision] = useState(0);
   const [gridWidth, setGridWidth] = useState(29);
   const [gridHeight, setGridHeight] = useState(29);
   const [mode, setMode] = useState<Mode>("cartoon");
@@ -179,124 +268,173 @@ export function BeadStudio() {
   const processImage = useCallback(() => {
     const image = imageRef.current;
     if (!image || !image.naturalWidth || activeColors.length === 0) return;
+    const requestId = ++processRequestRef.current;
+    const width = gridWidth;
+    const height = gridHeight;
     setProcessing(true);
     window.setTimeout(() => {
-      const offscreen = document.createElement("canvas");
-      offscreen.width = gridWidth;
-      offscreen.height = gridHeight;
-      const context = offscreen.getContext("2d", { willReadFrequently: true });
-      if (!context) return;
-      context.clearRect(0, 0, gridWidth, gridHeight);
-      context.imageSmoothingEnabled = mode !== "pixel";
-      context.imageSmoothingQuality = mode === "photo" ? "high" : "medium";
+      if (requestId !== processRequestRef.current) return;
+      try {
+        const offscreen = document.createElement("canvas");
+        offscreen.width = width;
+        offscreen.height = height;
+        const context = offscreen.getContext("2d", { willReadFrequently: true });
+        if (!context) throw new Error("canvas");
+        context.clearRect(0, 0, width, height);
+        context.imageSmoothingEnabled = mode !== "pixel";
+        context.imageSmoothingQuality = mode === "photo" ? "high" : "medium";
 
-      const sourceRatio = image.naturalWidth / image.naturalHeight;
-      const targetRatio = gridWidth / gridHeight;
-      let sx = 0;
-      let sy = 0;
-      let sw = image.naturalWidth;
-      let sh = image.naturalHeight;
-      let dx = 0;
-      let dy = 0;
-      let dw = gridWidth;
-      let dh = gridHeight;
+        const sourceRatio = image.naturalWidth / image.naturalHeight;
+        const targetRatio = width / height;
+        let sx = 0;
+        let sy = 0;
+        let sw = image.naturalWidth;
+        let sh = image.naturalHeight;
+        let dx = 0;
+        let dy = 0;
+        let dw = width;
+        let dh = height;
 
-      if (fit === "cover") {
-        if (sourceRatio > targetRatio) {
-          sw = image.naturalHeight * targetRatio;
-          sx = (image.naturalWidth - sw) / 2;
+        if (fit === "cover") {
+          if (sourceRatio > targetRatio) {
+            sw = image.naturalHeight * targetRatio;
+            sx = (image.naturalWidth - sw) / 2;
+          } else {
+            sh = image.naturalWidth / targetRatio;
+            sy = (image.naturalHeight - sh) / 2;
+          }
+        } else if (sourceRatio > targetRatio) {
+          dh = width / sourceRatio;
+          dy = (height - dh) / 2;
         } else {
-          sh = image.naturalWidth / targetRatio;
-          sy = (image.naturalHeight - sh) / 2;
+          dw = height * sourceRatio;
+          dx = (width - dw) / 2;
         }
-      } else if (sourceRatio > targetRatio) {
-        dh = gridWidth / sourceRatio;
-        dy = (gridHeight - dh) / 2;
-      } else {
-        dw = gridHeight * sourceRatio;
-        dx = (gridWidth - dw) / 2;
-      }
 
-      context.drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh);
-      const data = context.getImageData(0, 0, gridWidth, gridHeight).data;
-      const rawRgb: Array<[number, number, number] | null> = [];
-      const firstPass: number[] = [];
-      const frequency = new Map<number, number>();
-      for (let i = 0; i < gridWidth * gridHeight; i += 1) {
-        const offset = i * 4;
-        const alpha = data[offset + 3];
-        if (alpha < 42) {
-          rawRgb.push(null);
-          firstPass.push(EMPTY);
-          continue;
-        }
-        let rgb: [number, number, number] = [data[offset], data[offset + 1], data[offset + 2]];
-        if (mode === "photo") {
-          const average = (rgb[0] + rgb[1] + rgb[2]) / 3;
-          rgb = rgb.map((channel) => Math.max(0, Math.min(255, average + (channel - average) * 1.08 + 3))) as [number, number, number];
-        }
-        rawRgb.push(rgb);
-        const nearest = nearestColor(rgb, activeColors);
-        firstPass.push(nearest);
-        frequency.set(nearest, (frequency.get(nearest) ?? 0) + 1);
-      }
-
-      const preferred = [...frequency.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, Math.min(maxColors, activeColors.length))
-        .map(([index]) => index);
-      let result = rawRgb.map((rgb) => (rgb ? nearestColor(rgb, preferred) : EMPTY));
-
-      const passes = cleanup > 72 ? 2 : cleanup > 20 ? 1 : 0;
-      for (let pass = 0; pass < passes; pass += 1) {
-        const next = [...result];
-        for (let y = 0; y < gridHeight; y += 1) {
-          for (let x = 0; x < gridWidth; x += 1) {
-            const index = y * gridWidth + x;
-            if (result[index] === EMPTY) continue;
-            const neighbors: number[] = [];
-            [[-1, 0], [1, 0], [0, -1], [0, 1]].forEach(([ox, oy]) => {
-              const nx = x + ox;
-              const ny = y + oy;
-              if (nx >= 0 && nx < gridWidth && ny >= 0 && ny < gridHeight) {
-                const value = result[ny * gridWidth + nx];
-                if (value !== EMPTY) neighbors.push(value);
+        context.drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh);
+        const data = context.getImageData(0, 0, width, height).data;
+        const rawRgb: Array<[number, number, number] | null> = [];
+        for (let y = 0; y < height; y += 1) {
+          for (let x = 0; x < width; x += 1) {
+            const index = y * width + x;
+            const offset = index * 4;
+            if (data[offset + 3] < 42) {
+              rawRgb.push(null);
+              continue;
+            }
+            const original: [number, number, number] = [data[offset], data[offset + 1], data[offset + 2]];
+            let rgb = original;
+            if (mode === "photo") {
+              const totals = [0, 0, 0];
+              let neighbors = 0;
+              for (const [ox, oy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+                const nx = x + ox;
+                const ny = y + oy;
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                const neighborOffset = (ny * width + nx) * 4;
+                if (data[neighborOffset + 3] < 42) continue;
+                totals[0] += data[neighborOffset];
+                totals[1] += data[neighborOffset + 1];
+                totals[2] += data[neighborOffset + 2];
+                neighbors += 1;
               }
-            });
-            const same = neighbors.filter((value) => value === result[index]).length;
-            const counts = new Map<number, number>();
-            neighbors.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
-            const dominant = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-            const threshold = cleanup > 72 ? 2 : 1;
-            if (dominant && same <= threshold && dominant[1] >= 3) next[index] = dominant[0];
+              if (neighbors) {
+                rgb = original.map((channel, channelIndex) =>
+                  clampChannel(channel + (channel - totals[channelIndex] / neighbors) * 0.32),
+                ) as [number, number, number];
+              }
+            }
+            rawRgb.push(tuneRgb(rgb, mode));
           }
         }
-        result = next;
-      }
 
-      setCells(result);
-      setHistory([]);
-      setFuture([]);
-      setProcessing(false);
-      setCompare(false);
+        const preferred = choosePreferredColors(rawRgb, activeColors, maxColors, mode);
+        let result = rawRgb.map((rgb) => (rgb ? nearestColor(rgb, preferred) : EMPTY));
+
+        const passes = mode === "pixel"
+          ? 0
+          : mode === "photo"
+            ? (cleanup > 82 ? 1 : 0)
+            : cleanup > 72 ? 2 : cleanup > 20 ? 1 : 0;
+        for (let pass = 0; pass < passes; pass += 1) {
+          const next = [...result];
+          for (let y = 0; y < height; y += 1) {
+            for (let x = 0; x < width; x += 1) {
+              const index = y * width + x;
+              if (result[index] === EMPTY) continue;
+              const neighbors: number[] = [];
+              [[-1, 0], [1, 0], [0, -1], [0, 1]].forEach(([ox, oy]) => {
+                const nx = x + ox;
+                const ny = y + oy;
+                if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                  const value = result[ny * width + nx];
+                  if (value !== EMPTY) neighbors.push(value);
+                }
+              });
+              const same = neighbors.filter((value) => value === result[index]).length;
+              const counts = new Map<number, number>();
+              neighbors.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
+              const dominant = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+              const threshold = cleanup > 72 ? 2 : 1;
+              if (dominant && same <= threshold && dominant[1] >= 3) next[index] = dominant[0];
+            }
+          }
+          result = next;
+        }
+
+        if (requestId !== processRequestRef.current) return;
+        setCells(result);
+        setHistory([]);
+        setFuture([]);
+        setProcessing(false);
+        setCompare(false);
+      } catch {
+        if (requestId !== processRequestRef.current) return;
+        setProcessing(false);
+        notify("这张图片暂时没有处理成功，请换个设置再试");
+      }
     }, 20);
-  }, [activeColors, cleanup, fit, gridHeight, gridWidth, maxColors, mode]);
+  }, [activeColors, cleanup, fit, gridHeight, gridWidth, maxColors, mode, notify]);
 
   useEffect(() => {
-    if (!sourceUrl) return;
+    processRequestRef.current += 1;
+    if (!sourceUrl) {
+      imageRef.current = null;
+      setProcessing(false);
+      return;
+    }
+    let cancelled = false;
+    setProcessing(true);
     const image = new Image();
     image.onload = () => {
+      if (cancelled) return;
       imageRef.current = image;
-      const nextHeight = Math.max(12, Math.min(80, Math.round(gridWidth * image.naturalHeight / image.naturalWidth)));
-      setGridHeight(nextHeight);
-      window.setTimeout(processImage, 0);
+      setImageRevision((value) => value + 1);
+    };
+    image.onerror = () => {
+      if (cancelled) return;
+      setProcessing(false);
+      notify("这张图片没有读取成功，请重新选择");
     };
     image.src = sourceUrl;
-  }, [gridWidth, processImage, sourceUrl]);
+    return () => {
+      cancelled = true;
+      image.onload = null;
+      image.onerror = null;
+      processRequestRef.current += 1;
+    };
+  }, [notify, sourceUrl]);
+
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!sourceUrl || !image?.naturalWidth) return;
+    const nextHeight = Math.max(12, Math.min(80, Math.round(gridWidth * image.naturalHeight / image.naturalWidth)));
+    setGridHeight(nextHeight);
+  }, [gridWidth, imageRevision, sourceUrl]);
 
   useEffect(() => {
     if (sourceUrl && imageRef.current) processImage();
-  }, [gridHeight, gridWidth, mode, maxColors, cleanup, fit, activeColors, processImage, sourceUrl]);
+  }, [imageRevision, processImage, sourceUrl]);
 
   const drawPattern = useCallback((canvas: HTMLCanvasElement, exportKind?: "preview" | "pattern") => {
     if (!cells.length) return;
@@ -321,8 +459,8 @@ export function BeadStudio() {
         const value = cells[y * gridWidth + x];
         const px = x * cellSize;
         const py = y * cellSize + header;
-        if (value !== EMPTY) {
-          const color = PALETTE[value];
+        const color = value === EMPTY ? undefined : PALETTE[value];
+        if (color) {
           context.fillStyle = color.hex;
           if ((exportKind !== "pattern" && roundBeads) || (!exportKind && roundBeads)) {
             context.beginPath();
@@ -346,14 +484,14 @@ export function BeadStudio() {
           context.lineWidth = x % 5 === 0 || y % 5 === 0 ? 1.2 : 0.6;
           context.strokeRect(px, py, cellSize, cellSize);
         }
-        if (value !== EMPTY && (exportKind === "pattern" || (showCodes && cellSize >= 16))) {
-          const rgb = PALETTE[value].rgb;
+        if (color && (exportKind === "pattern" || (showCodes && cellSize >= 16))) {
+          const rgb = color.rgb;
           const lightness = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
           context.fillStyle = lightness > 155 ? "#4d443f" : "#fffdf8";
           context.font = `${Math.max(7, Math.floor(cellSize * 0.22))}px Arial, sans-serif`;
           context.textAlign = "center";
           context.textBaseline = "middle";
-          context.fillText(PALETTE[value].code, px + cellSize / 2, py + cellSize / 2);
+          context.fillText(color.code, px + cellSize / 2, py + cellSize / 2);
           context.textAlign = "start";
           context.textBaseline = "alphabetic";
         }
@@ -505,6 +643,22 @@ export function BeadStudio() {
     }
   };
 
+  const applyMode = (nextMode: Mode) => {
+    setMode(nextMode);
+    if (nextMode === "pixel") {
+      setCleanup(0);
+      notify("像素模式：保留硬边和颗粒感");
+    } else if (nextMode === "cartoon") {
+      setCleanup(55);
+      notify("卡通模式：强化色块并清理碎色");
+    } else {
+      setGridWidth((value) => Math.max(40, value));
+      setMaxColors((value) => Math.max(18, value));
+      setCleanup((value) => Math.min(18, value));
+      notify("照片模式：已保留更多颜色和人物细节");
+    }
+  };
+
   const handleDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setDragging(false);
@@ -568,11 +722,14 @@ export function BeadStudio() {
                   ["cartoon", "✦", "卡通", "干净色块"],
                   ["photo", "◉", "照片", "柔和细节"],
                 ] as const).map(([value, icon, title, desc]) => (
-                  <button key={value} className={mode === value ? "mode active" : "mode"} type="button" onClick={() => setMode(value)}>
+                  <button key={value} className={mode === value ? "mode active" : "mode"} type="button" onClick={() => applyMode(value)}>
                     <span>{icon}</span><b>{title}</b><small>{desc}</small>
                   </button>
                 ))}
               </div>
+              <small className="mode-tip">
+                {mode === "photo" ? "人物照片建议 40 格以上；已自动保留更多颜色和细节。" : mode === "cartoon" ? "适合插画、头像和色块清楚的图片。" : "适合像素画和边缘清楚的小图标。"}
+              </small>
             </div>
 
             <div className="field-group">
