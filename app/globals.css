@@ -344,17 +344,27 @@ select, .project-summary input {
 .tool-group button:disabled { opacity: .28; cursor: default; }
 .tool-group.compact button { font-size: 14px; }
 .tool-group.compact button:last-child { font-size: 11px; }
+.zoom-control { display: flex; align-items: center; gap: 1px; margin-right: 3px; border: 1px solid #eadfd5; border-radius: 9px; background: #fffaf5; }
+.zoom-control button { min-height: 30px; padding: 4px 7px; border-radius: 7px; }
+.zoom-control output { min-width: 42px; color: #756961; font-size: 10px; font-weight: 700; text-align: center; }
 
 .canvas-stage {
   position: relative;
   min-height: 520px;
   padding: 28px;
-  display: grid;
-  place-items: center;
+  display: block;
   background:
     radial-gradient(circle, rgba(112,90,73,.09) 1px, transparent 1.4px) 0 0 / 17px 17px,
     #f5ede3;
   overflow: auto;
+}
+
+.canvas-content {
+  display: grid;
+  place-items: center;
+  width: max-content;
+  min-width: 100%;
+  min-height: 464px;
 }
 
 .pattern-canvas {
@@ -369,6 +379,7 @@ select, .project-summary input {
   touch-action: none;
   cursor: crosshair;
 }
+.pattern-canvas.is-zoomed { max-width: none; max-height: none; }
 
 .compare-image {
   display: block;
@@ -521,6 +532,7 @@ footer {
   .export-panel .material-list { max-height: 310px; }
   .export-panel .export-actions { border-top: 1px solid #eee3d9; padding-top: 14px; margin-top: 14px; }
   .canvas-stage { min-height: 390px; padding: 16px; }
+  .canvas-content { min-height: 358px; }
   .pattern-canvas { max-height: 460px; }
   .tool-group button span { display: none; }
 }
@@ -530,6 +542,7 @@ footer {
   .welcome-actions .button { width: 100%; }
   .drop-card { min-height: 300px; border-radius: 25px; }
   .canvas-stage { min-height: 330px; }
+  .canvas-content { min-height: 298px; }
   .workspace-toolbar { align-items: flex-start; }
   .tool-group { gap: 2px; }
   .tool-group button { padding: 5px 7px; }

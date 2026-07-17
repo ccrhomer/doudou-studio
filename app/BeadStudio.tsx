@@ -230,6 +230,23 @@ function makeDemo() {
   return { width, height, cells };
 }
 
+function resizePattern(cells: BeadCell[], width: number, height: number, nextWidth: number) {
+  const nextHeight = Math.max(12, Math.min(80, Math.round(nextWidth * height / width)));
+  const resized = new Array(nextWidth * nextHeight).fill(EMPTY);
+  for (let y = 0; y < nextHeight; y += 1) {
+    const sourceY = Math.min(height - 1, Math.floor((y + 0.5) * height / nextHeight));
+    for (let x = 0; x < nextWidth; x += 1) {
+      const sourceX = Math.min(width - 1, Math.floor((x + 0.5) * width / nextWidth));
+      resized[y * nextWidth + x] = cells[sourceY * width + sourceX] ?? EMPTY;
+    }
+  }
+  return { width: nextWidth, height: nextHeight, cells: resized };
+}
+
+function displayCellSize(width: number) {
+  return width <= 32 ? 23 : width <= 58 ? 16 : 12;
+}
+
 export function BeadStudio() {
   const inputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -253,6 +270,7 @@ export function BeadStudio() {
   const [tool, setTool] = useState<Tool>("paint");
   const [showCodes, setShowCodes] = useState(false);
   const [roundBeads, setRoundBeads] = useState(true);
+  const [canvasZoom, setCanvasZoom] = useState(100);
   const [compare, setCompare] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -438,7 +456,9 @@ export function BeadStudio() {
 
   const drawPattern = useCallback((canvas: HTMLCanvasElement, exportKind?: "preview" | "pattern") => {
     if (!cells.length) return;
-    const cellSize = exportKind ? (exportKind === "pattern" ? 52 : 34) : gridWidth <= 32 ? 23 : gridWidth <= 58 ? 16 : 12;
+    const cellSize = exportKind
+      ? (exportKind === "pattern" ? 52 : 34)
+      : Math.round(displayCellSize(gridWidth) * canvasZoom / 100);
     const header = exportKind ? 92 : 0;
     canvas.width = gridWidth * cellSize;
     canvas.height = gridHeight * cellSize + header;
@@ -488,7 +508,7 @@ export function BeadStudio() {
           const rgb = color.rgb;
           const lightness = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
           context.fillStyle = lightness > 155 ? "#4d443f" : "#fffdf8";
-          context.font = `${Math.max(7, Math.floor(cellSize * 0.22))}px Arial, sans-serif`;
+          context.font = `700 ${Math.max(8, Math.floor(cellSize * 0.3))}px Arial, sans-serif`;
           context.textAlign = "center";
           context.textBaseline = "middle";
           context.fillText(color.code, px + cellSize / 2, py + cellSize / 2);
@@ -497,11 +517,11 @@ export function BeadStudio() {
         }
       }
     }
-  }, [cells, gridHeight, gridWidth, roundBeads, showCodes, sourceName]);
+  }, [canvasZoom, cells, gridHeight, gridWidth, roundBeads, showCodes, sourceName]);
 
   useEffect(() => {
-    if (canvasRef.current) drawPattern(canvasRef.current);
-  }, [drawPattern]);
+    if (!compare && canvasRef.current) drawPattern(canvasRef.current);
+  }, [compare, drawPattern]);
 
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
@@ -523,6 +543,8 @@ export function BeadStudio() {
         setCells(imported);
         setSourceName(project.name ?? "导入的拼豆");
         setSourceUrl("");
+        setCompare(false);
+        setCanvasZoom(100);
         setHistory([]);
         setFuture([]);
         notify("项目已经打开啦");
@@ -542,6 +564,8 @@ export function BeadStudio() {
     if (sourceUrl) URL.revokeObjectURL(sourceUrl);
     setSourceName(file.name.replace(/\.[^.]+$/, "") || "我的拼豆");
     setSourceUrl(URL.createObjectURL(file));
+    setCompare(false);
+    setCanvasZoom(100);
   };
 
   const handleInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -625,13 +649,31 @@ export function BeadStudio() {
 
   const loadDemo = () => {
     const demo = makeDemo();
+    if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+    imageRef.current = null;
     setGridWidth(demo.width);
     setGridHeight(demo.height);
     setCells(demo.cells);
     setSourceName("小草莓");
     setSourceUrl("");
+    setCompare(false);
+    setCanvasZoom(100);
     setHistory([]);
     setFuture([]);
+  };
+
+  const changeGridWidth = (nextValue: number) => {
+    const nextWidth = Math.max(12, Math.min(80, nextValue));
+    if (!sourceUrl && cells.length === gridWidth * gridHeight) {
+      const resized = resizePattern(cells, gridWidth, gridHeight, nextWidth);
+      setGridWidth(resized.width);
+      setGridHeight(resized.height);
+      setCells(resized.cells);
+      setHistory([]);
+      setFuture([]);
+      return;
+    }
+    setGridWidth(nextWidth);
   };
 
   const togglePalette = (index: number) => {
@@ -652,7 +694,7 @@ export function BeadStudio() {
       setCleanup(55);
       notify("卡通模式：强化色块并清理碎色");
     } else {
-      setGridWidth((value) => Math.max(40, value));
+      changeGridWidth(Math.max(40, gridWidth));
       setMaxColors((value) => Math.max(18, value));
       setCleanup((value) => Math.min(18, value));
       notify("照片模式：已保留更多颜色和人物细节");
@@ -735,9 +777,9 @@ export function BeadStudio() {
             <div className="field-group">
               <label>图纸宽度 <output>{gridWidth} 格</output></label>
               <div className="size-pills">
-                {[20, 29, 40, 58].map((size) => <button key={size} type="button" className={gridWidth === size ? "active" : ""} onClick={() => setGridWidth(size)}>{size}</button>)}
+                {[20, 29, 40, 58].map((size) => <button key={size} type="button" className={gridWidth === size ? "active" : ""} onClick={() => changeGridWidth(size)}>{size}</button>)}
               </div>
-              <input aria-label="自定义图纸宽度" type="range" min="12" max="80" value={gridWidth} onChange={(event) => setGridWidth(Number(event.target.value))} />
+              <input aria-label="自定义图纸宽度" type="range" min="12" max="80" value={gridWidth} onChange={(event) => changeGridWidth(Number(event.target.value))} />
               <small className="field-help">当前约 {gridWidth} × {gridHeight} 格</small>
             </div>
 
@@ -784,25 +826,32 @@ export function BeadStudio() {
               <div className="tool-group compact">
                 <button type="button" disabled={!history.length} onClick={undo} title="撤销">↶</button>
                 <button type="button" disabled={!future.length} onClick={redo} title="重做">↷</button>
+                <div className="zoom-control" aria-label="图纸缩放">
+                  <button type="button" aria-label="缩小图纸" disabled={compare || canvasZoom <= 100} onClick={() => setCanvasZoom((value) => Math.max(100, value - 25))}>−</button>
+                  <output aria-label="当前图纸缩放">{canvasZoom}%</output>
+                  <button type="button" aria-label="放大图纸" disabled={compare || canvasZoom >= 200} onClick={() => setCanvasZoom((value) => Math.min(200, value + 25))}>＋</button>
+                </div>
                 {sourceUrl && <button type="button" className={compare ? "active" : ""} onClick={() => setCompare(!compare)}>{compare ? "看豆图" : "看原图"}</button>}
               </div>
             </div>
 
             <div className="canvas-stage">
               {processing && <div className="processing"><span /><b>正在撒豆豆…</b></div>}
-              {compare && sourceUrl ? (
-                <img className="compare-image" src={sourceUrl} alt="原图对比" />
-              ) : (
-                <canvas
-                  ref={canvasRef}
-                  className="pattern-canvas"
-                  aria-label="可编辑的拼豆图纸"
-                  onPointerDown={(event) => { drawingRef.current = true; event.currentTarget.setPointerCapture(event.pointerId); editAt(event, true); }}
-                  onPointerMove={(event) => { if (drawingRef.current) editAt(event, false); }}
-                  onPointerUp={() => { drawingRef.current = false; }}
-                  onPointerCancel={() => { drawingRef.current = false; }}
-                />
-              )}
+              <div className="canvas-content">
+                {compare && sourceUrl ? (
+                  <img className="compare-image" src={sourceUrl} alt="原图对比" />
+                ) : (
+                  <canvas
+                    ref={canvasRef}
+                    className={`pattern-canvas ${canvasZoom > 100 ? "is-zoomed" : ""}`}
+                    aria-label="可编辑的拼豆图纸"
+                    onPointerDown={(event) => { drawingRef.current = true; event.currentTarget.setPointerCapture(event.pointerId); editAt(event, true); }}
+                    onPointerMove={(event) => { if (drawingRef.current) editAt(event, false); }}
+                    onPointerUp={() => { drawingRef.current = false; }}
+                    onPointerCancel={() => { drawingRef.current = false; }}
+                  />
+                )}
+              </div>
             </div>
 
             <div className="canvas-footer">
