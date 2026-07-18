@@ -11,9 +11,12 @@ import {
   useState,
 } from "react";
 import type { CSSProperties } from "react";
+import { TencentRum } from "./TencentRum";
 
-type Mode = "pixel" | "cartoon" | "photo";
+type Mode = "detail" | "blocks" | "simple";
 type Tool = "paint" | "erase" | "pick";
+type InteractionMode = "view" | "edit";
+type MobilePanel = "settings" | "canvas" | "export";
 type BeadCell = number;
 
 type PaletteColor = {
@@ -126,16 +129,68 @@ function clampChannel(value: number) {
 
 function tuneRgb(rgb: [number, number, number], mode: Mode): [number, number, number] {
   const luma = rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114;
-  const saturation = mode === "cartoon" ? 1.3 : mode === "pixel" ? 1.14 : 1.08;
-  const contrast = mode === "cartoon" ? 1.14 : mode === "pixel" ? 1.18 : 1.07;
-  const brightness = mode === "photo" ? 3 : 0;
+  const saturation = mode === "simple" ? 1.25 : mode === "blocks" ? 1.16 : 1.06;
+  const contrast = mode === "simple" ? 1.15 : mode === "blocks" ? 1.11 : 1.06;
+  const brightness = mode === "detail" ? 3 : 0;
+  const step = mode === "simple" ? 24 : mode === "blocks" ? 12 : 1;
   const tuned = rgb.map((channel) => {
     const saturated = luma + (channel - luma) * saturation;
     const contrasted = 128 + (saturated - 128) * contrast + brightness;
-    const value = mode === "cartoon" ? Math.round(contrasted / 18) * 18 : contrasted;
+    const value = step > 1 ? Math.round(contrasted / step) * step : contrasted;
     return clampChannel(value);
   });
   return tuned as [number, number, number];
+}
+
+function simplifySamples(
+  samples: Array<[number, number, number] | null>,
+  width: number,
+  height: number,
+  mode: Mode,
+) {
+  const passes = mode === "simple" ? 2 : mode === "blocks" ? 1 : 0;
+  if (!passes) return samples;
+  const threshold = mode === "simple" ? 88 : 58;
+  let current = samples;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const next = [...current];
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const index = y * width + x;
+        const center = current[index];
+        if (!center) continue;
+        const total = [...center] as [number, number, number];
+        let weight = 1;
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) {
+            if (!ox && !oy) continue;
+            const nx = x + ox;
+            const ny = y + oy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            const neighbor = current[ny * width + nx];
+            if (!neighbor) continue;
+            const distance = Math.sqrt(
+              Math.pow(center[0] - neighbor[0], 2) +
+              Math.pow(center[1] - neighbor[1], 2) +
+              Math.pow(center[2] - neighbor[2], 2),
+            );
+            if (distance > threshold) continue;
+            total[0] += neighbor[0];
+            total[1] += neighbor[1];
+            total[2] += neighbor[2];
+            weight += 1;
+          }
+        }
+        next[index] = [
+          clampChannel(total[0] / weight),
+          clampChannel(total[1] / weight),
+          clampChannel(total[2] / weight),
+        ];
+      }
+    }
+    current = next;
+  }
+  return current;
 }
 
 function choosePreferredColors(
@@ -154,7 +209,7 @@ function choosePreferredColors(
     frequency.set(nearest, (frequency.get(nearest) ?? 0) + 1);
   }
 
-  if (mode !== "photo") {
+  if (mode !== "detail") {
     return [...frequency.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, amount)
@@ -250,18 +305,23 @@ function displayCellSize(width: number) {
 export function BeadStudio() {
   const inputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const drawingRef = useRef(false);
+  const gestureRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean; pointerType: string } | null>(null);
   const processRequestRef = useRef(0);
   const [sourceUrl, setSourceUrl] = useState("");
   const [sourceName, setSourceName] = useState("我的拼豆");
   const [imageRevision, setImageRevision] = useState(0);
   const [gridWidth, setGridWidth] = useState(29);
   const [gridHeight, setGridHeight] = useState(29);
-  const [mode, setMode] = useState<Mode>("cartoon");
+  const [mode, setMode] = useState<Mode>("blocks");
   const [maxColors, setMaxColors] = useState(12);
   const [cleanup, setCleanup] = useState(45);
   const [fit, setFit] = useState<"cover" | "contain">("cover");
+  const [cropZoom, setCropZoom] = useState(100);
+  const [focusX, setFocusX] = useState(50);
+  const [focusY, setFocusY] = useState(50);
   const [cells, setCells] = useState<BeadCell[]>([]);
   const [history, setHistory] = useState<BeadCell[][]>([]);
   const [future, setFuture] = useState<BeadCell[][]>([]);
@@ -271,6 +331,8 @@ export function BeadStudio() {
   const [showCodes, setShowCodes] = useState(false);
   const [roundBeads, setRoundBeads] = useState(true);
   const [canvasZoom, setCanvasZoom] = useState(100);
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("view");
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>("canvas");
   const [compare, setCompare] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -299,8 +361,8 @@ export function BeadStudio() {
         const context = offscreen.getContext("2d", { willReadFrequently: true });
         if (!context) throw new Error("canvas");
         context.clearRect(0, 0, width, height);
-        context.imageSmoothingEnabled = mode !== "pixel";
-        context.imageSmoothingQuality = mode === "photo" ? "high" : "medium";
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = mode === "detail" ? "high" : "medium";
 
         const sourceRatio = image.naturalWidth / image.naturalHeight;
         const targetRatio = width / height;
@@ -316,11 +378,14 @@ export function BeadStudio() {
         if (fit === "cover") {
           if (sourceRatio > targetRatio) {
             sw = image.naturalHeight * targetRatio;
-            sx = (image.naturalWidth - sw) / 2;
           } else {
             sh = image.naturalWidth / targetRatio;
-            sy = (image.naturalHeight - sh) / 2;
           }
+          const zoom = cropZoom / 100;
+          sw /= zoom;
+          sh /= zoom;
+          sx = (image.naturalWidth - sw) * focusX / 100;
+          sy = (image.naturalHeight - sh) * focusY / 100;
         } else if (sourceRatio > targetRatio) {
           dh = width / sourceRatio;
           dy = (height - dh) / 2;
@@ -331,49 +396,28 @@ export function BeadStudio() {
 
         context.drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh);
         const data = context.getImageData(0, 0, width, height).data;
-        const rawRgb: Array<[number, number, number] | null> = [];
+        const sourceSamples: Array<[number, number, number] | null> = [];
         for (let y = 0; y < height; y += 1) {
           for (let x = 0; x < width; x += 1) {
             const index = y * width + x;
             const offset = index * 4;
             if (data[offset + 3] < 42) {
-              rawRgb.push(null);
+              sourceSamples.push(null);
               continue;
             }
-            const original: [number, number, number] = [data[offset], data[offset + 1], data[offset + 2]];
-            let rgb = original;
-            if (mode === "photo") {
-              const totals = [0, 0, 0];
-              let neighbors = 0;
-              for (const [ox, oy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
-                const nx = x + ox;
-                const ny = y + oy;
-                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-                const neighborOffset = (ny * width + nx) * 4;
-                if (data[neighborOffset + 3] < 42) continue;
-                totals[0] += data[neighborOffset];
-                totals[1] += data[neighborOffset + 1];
-                totals[2] += data[neighborOffset + 2];
-                neighbors += 1;
-              }
-              if (neighbors) {
-                rgb = original.map((channel, channelIndex) =>
-                  clampChannel(channel + (channel - totals[channelIndex] / neighbors) * 0.32),
-                ) as [number, number, number];
-              }
-            }
-            rawRgb.push(tuneRgb(rgb, mode));
+            sourceSamples.push([data[offset], data[offset + 1], data[offset + 2]]);
           }
         }
+
+        const rawRgb = simplifySamples(sourceSamples, width, height, mode)
+          .map((rgb) => rgb ? tuneRgb(rgb, mode) : null);
 
         const preferred = choosePreferredColors(rawRgb, activeColors, maxColors, mode);
         let result = rawRgb.map((rgb) => (rgb ? nearestColor(rgb, preferred) : EMPTY));
 
-        const passes = mode === "pixel"
-          ? 0
-          : mode === "photo"
-            ? (cleanup > 82 ? 1 : 0)
-            : cleanup > 72 ? 2 : cleanup > 20 ? 1 : 0;
+        const passes = mode === "detail"
+          ? (cleanup > 70 ? 1 : 0)
+          : cleanup > 72 ? 2 : cleanup > 20 ? 1 : 0;
         for (let pass = 0; pass < passes; pass += 1) {
           const next = [...result];
           for (let y = 0; y < height; y += 1) {
@@ -412,17 +456,15 @@ export function BeadStudio() {
         notify("这张图片暂时没有处理成功，请换个设置再试");
       }
     }, 20);
-  }, [activeColors, cleanup, fit, gridHeight, gridWidth, maxColors, mode, notify]);
+  }, [activeColors, cleanup, cropZoom, fit, focusX, focusY, gridHeight, gridWidth, maxColors, mode, notify]);
 
   useEffect(() => {
     processRequestRef.current += 1;
     if (!sourceUrl) {
       imageRef.current = null;
-      setProcessing(false);
       return;
     }
     let cancelled = false;
-    setProcessing(true);
     const image = new Image();
     image.onload = () => {
       if (cancelled) return;
@@ -523,15 +565,6 @@ export function BeadStudio() {
     if (!compare && canvasRef.current) drawPattern(canvasRef.current);
   }, [compare, drawPattern]);
 
-  useEffect(() => {
-    const onPaste = (event: ClipboardEvent) => {
-      const file = [...(event.clipboardData?.files ?? [])].find((item) => item.type.startsWith("image/"));
-      if (file) void readFile(file);
-    };
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-  });
-
   const readFile = async (file: File) => {
     if (file.name.toLowerCase().endsWith(".json")) {
       try {
@@ -545,6 +578,8 @@ export function BeadStudio() {
         setSourceUrl("");
         setCompare(false);
         setCanvasZoom(100);
+        setInteractionMode("view");
+        setMobilePanel("canvas");
         setHistory([]);
         setFuture([]);
         notify("项目已经打开啦");
@@ -562,11 +597,26 @@ export function BeadStudio() {
       return;
     }
     if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+    setProcessing(true);
     setSourceName(file.name.replace(/\.[^.]+$/, "") || "我的拼豆");
     setSourceUrl(URL.createObjectURL(file));
     setCompare(false);
     setCanvasZoom(100);
+    setCropZoom(100);
+    setFocusX(50);
+    setFocusY(50);
+    setInteractionMode("view");
+    setMobilePanel("settings");
   };
+
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      const file = [...(event.clipboardData?.files ?? [])].find((item) => item.type.startsWith("image/"));
+      if (file) void readFile(file);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
 
   const handleInput = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -599,6 +649,41 @@ export function BeadStudio() {
     next[index] = value;
     if (commit) pushEdit(next);
     else setCells(next);
+  };
+
+  const beginCanvasGesture = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (interactionMode !== "edit") return;
+    gestureRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      moved: false,
+      pointerType: event.pointerType,
+    };
+    drawingRef.current = event.pointerType === "mouse";
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (event.pointerType === "mouse") editAt(event, true);
+  };
+
+  const moveCanvasGesture = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 8) gesture.moved = true;
+    if (drawingRef.current && gesture.pointerType === "mouse") editAt(event, false);
+  };
+
+  const endCanvasGesture = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const gesture = gestureRef.current;
+    if (gesture && gesture.pointerId === event.pointerId && gesture.pointerType !== "mouse" && !gesture.moved) {
+      editAt(event, true);
+    }
+    drawingRef.current = false;
+    gestureRef.current = null;
+  };
+
+  const fitCanvas = () => {
+    setCanvasZoom(100);
+    window.requestAnimationFrame(() => stageRef.current?.scrollTo({ left: 0, top: 0, behavior: "smooth" }));
   };
 
   const undo = () => {
@@ -658,6 +743,8 @@ export function BeadStudio() {
     setSourceUrl("");
     setCompare(false);
     setCanvasZoom(100);
+    setInteractionMode("view");
+    setMobilePanel("canvas");
     setHistory([]);
     setFuture([]);
   };
@@ -687,17 +774,19 @@ export function BeadStudio() {
 
   const applyMode = (nextMode: Mode) => {
     setMode(nextMode);
-    if (nextMode === "pixel") {
-      setCleanup(0);
-      notify("像素模式：保留硬边和颗粒感");
-    } else if (nextMode === "cartoon") {
+    if (nextMode === "simple") {
+      setMaxColors((value) => Math.min(12, value));
+      setCleanup(82);
+      notify("极简图案：合并纹理和零碎色块");
+    } else if (nextMode === "blocks") {
+      setMaxColors((value) => Math.max(12, Math.min(18, value)));
       setCleanup(55);
-      notify("卡通模式：强化色块并清理碎色");
+      notify("色块清晰：突出主体和主要轮廓");
     } else {
       changeGridWidth(Math.max(40, gridWidth));
       setMaxColors((value) => Math.max(18, value));
-      setCleanup((value) => Math.min(18, value));
-      notify("照片模式：已保留更多颜色和人物细节");
+      setCleanup(25);
+      notify("保留细节：适合 40 格以上的照片");
     }
   };
 
@@ -715,13 +804,14 @@ export function BeadStudio() {
       onDragLeave={() => setDragging(false)}
       onDrop={handleDrop}
     >
+      <TencentRum />
       <input ref={inputRef} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp,.json" onChange={handleInput} />
       <header className="topbar">
         <button className="brand" type="button" onClick={() => window.location.reload()} aria-label="返回首页">
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
           <span><b>豆豆画室</b><small>把喜欢的图片，变成小小拼豆</small></span>
         </button>
-        <span className="privacy-pill"><span>♥</span> 图片只在你的设备里处理</span>
+        <span className="privacy-pill"><span>♥</span> 图片只在设备里处理</span>
       </header>
 
       {!hasPattern ? (
@@ -747,22 +837,31 @@ export function BeadStudio() {
           </button>
         </section>
       ) : (
-        <section className="studio">
+        <section className={`studio mobile-${mobilePanel}`}>
           <aside className="panel settings-panel">
             <div className="panel-heading">
               <div><span className="step">01</span><h2>选个效果</h2></div>
               <button className="text-button" type="button" onClick={() => inputRef.current?.click()}>换图片</button>
             </div>
 
-            {sourceUrl && <img className="source-thumb" src={sourceUrl} alt="上传的原图" />}
+            {sourceUrl && (
+              <div className="crop-preview" aria-label="当前取景预览">
+                <img
+                  src={sourceUrl}
+                  alt="上传的原图"
+                  style={{ objectPosition: `${focusX}% ${focusY}%`, transform: `scale(${cropZoom / 100})` }}
+                />
+                <span>取景预览</span>
+              </div>
+            )}
 
             <div className="field-group">
-              <label>图片类型</label>
+              <label>照片简化方式</label>
               <div className="mode-grid">
                 {([
-                  ["pixel", "▦", "像素", "保留硬边"],
-                  ["cartoon", "✦", "卡通", "干净色块"],
-                  ["photo", "◉", "照片", "柔和细节"],
+                  ["detail", "◉", "保留细节", "40 格以上"],
+                  ["blocks", "✦", "色块清晰", "推荐"],
+                  ["simple", "▦", "极简图案", "小工程"],
                 ] as const).map(([value, icon, title, desc]) => (
                   <button key={value} className={mode === value ? "mode active" : "mode"} type="button" onClick={() => applyMode(value)}>
                     <span>{icon}</span><b>{title}</b><small>{desc}</small>
@@ -770,9 +869,28 @@ export function BeadStudio() {
                 ))}
               </div>
               <small className="mode-tip">
-                {mode === "photo" ? "人物照片建议 40 格以上；已自动保留更多颜色和细节。" : mode === "cartoon" ? "适合插画、头像和色块清楚的图片。" : "适合像素画和边缘清楚的小图标。"}
+                {mode === "detail" ? "保留较多明暗和颜色，人物照片建议 40～58 格。" : mode === "blocks" ? "先平滑纹理，再保留主体轮廓，适合大多数照片。" : "强力合并背景纹理和零碎颜色，适合 20～29 格。"}
               </small>
             </div>
+
+            {sourceUrl && (
+              <div className="field-group crop-controls">
+                <label>裁剪并突出主体 <output>{cropZoom}%</output></label>
+                <input aria-label="放大主体" type="range" min="100" max="200" step="10" value={cropZoom} onChange={(event) => setCropZoom(Number(event.target.value))} disabled={fit === "contain"} />
+                <div className="focus-grid" aria-label="主体位置">
+                  {[0, 50, 100].flatMap((y) => [0, 50, 100].map((x) => (
+                    <button
+                      key={`${x}-${y}`}
+                      type="button"
+                      aria-label={`主体位置 ${x}-${y}`}
+                      className={focusX === x && focusY === y ? "active" : ""}
+                      onClick={() => { setFit("cover"); setFocusX(x); setFocusY(y); }}
+                    />
+                  )))}
+                </div>
+                <small className="mode-tip">先放大并把人物或主体移到合适位置，通常比增加豆子更有效。</small>
+              </div>
+            )}
 
             <div className="field-group">
               <label>图纸宽度 <output>{gridWidth} 格</output></label>
@@ -818,24 +936,33 @@ export function BeadStudio() {
 
           <section className="workspace">
             <div className="workspace-toolbar">
-              <div className="tool-group" aria-label="编辑工具">
-                <button type="button" className={tool === "paint" ? "active" : ""} onClick={() => setTool("paint")} title="画笔">✎ <span>画笔</span></button>
-                <button type="button" className={tool === "erase" ? "active" : ""} onClick={() => setTool("erase")} title="橡皮">◇ <span>擦除</span></button>
-                <button type="button" className={tool === "pick" ? "active" : ""} onClick={() => setTool("pick")} title="吸色">◉ <span>吸色</span></button>
+              <div className="tool-group" aria-label="查看或编辑图纸">
+                <div className="interaction-toggle">
+                  <button type="button" className={interactionMode === "view" ? "active" : ""} onClick={() => setInteractionMode("view")}>☝ <span>移动</span></button>
+                  <button type="button" className={interactionMode === "edit" ? "active" : ""} onClick={() => setInteractionMode("edit")}>✎ <span>编辑</span></button>
+                </div>
+                {interactionMode === "edit" && (
+                  <div className="edit-tools">
+                    <button type="button" className={tool === "paint" ? "active" : ""} onClick={() => setTool("paint")} title="画笔">● <span>换色</span></button>
+                    <button type="button" className={tool === "erase" ? "active" : ""} onClick={() => setTool("erase")} title="橡皮">◇ <span>擦除</span></button>
+                    <button type="button" className={tool === "pick" ? "active" : ""} onClick={() => setTool("pick")} title="吸色">◎ <span>吸色</span></button>
+                  </div>
+                )}
               </div>
               <div className="tool-group compact">
                 <button type="button" disabled={!history.length} onClick={undo} title="撤销">↶</button>
                 <button type="button" disabled={!future.length} onClick={redo} title="重做">↷</button>
                 <div className="zoom-control" aria-label="图纸缩放">
+                  <button type="button" aria-label="适应屏幕" disabled={compare} onClick={fitCanvas}>适应</button>
                   <button type="button" aria-label="缩小图纸" disabled={compare || canvasZoom <= 100} onClick={() => setCanvasZoom((value) => Math.max(100, value - 25))}>−</button>
                   <output aria-label="当前图纸缩放">{canvasZoom}%</output>
-                  <button type="button" aria-label="放大图纸" disabled={compare || canvasZoom >= 200} onClick={() => setCanvasZoom((value) => Math.min(200, value + 25))}>＋</button>
+                  <button type="button" aria-label="放大图纸" disabled={compare || canvasZoom >= 250} onClick={() => setCanvasZoom((value) => Math.min(250, value + 25))}>＋</button>
                 </div>
                 {sourceUrl && <button type="button" className={compare ? "active" : ""} onClick={() => setCompare(!compare)}>{compare ? "看豆图" : "看原图"}</button>}
               </div>
             </div>
 
-            <div className="canvas-stage">
+            <div ref={stageRef} className={`canvas-stage ${interactionMode === "view" ? "is-viewing" : "is-editing"}`}>
               {processing && <div className="processing"><span /><b>正在撒豆豆…</b></div>}
               <div className="canvas-content">
                 {compare && sourceUrl ? (
@@ -843,12 +970,12 @@ export function BeadStudio() {
                 ) : (
                   <canvas
                     ref={canvasRef}
-                    className={`pattern-canvas ${canvasZoom > 100 ? "is-zoomed" : ""}`}
-                    aria-label="可编辑的拼豆图纸"
-                    onPointerDown={(event) => { drawingRef.current = true; event.currentTarget.setPointerCapture(event.pointerId); editAt(event, true); }}
-                    onPointerMove={(event) => { if (drawingRef.current) editAt(event, false); }}
-                    onPointerUp={() => { drawingRef.current = false; }}
-                    onPointerCancel={() => { drawingRef.current = false; }}
+                    className={`pattern-canvas ${canvasZoom > 100 ? "is-zoomed" : ""} ${interactionMode === "view" ? "view-only" : "editable"}`}
+                    aria-label={interactionMode === "view" ? "拼豆图纸，当前为移动查看模式" : "可点击修改的拼豆图纸"}
+                    onPointerDown={beginCanvasGesture}
+                    onPointerMove={moveCanvasGesture}
+                    onPointerUp={endCanvasGesture}
+                    onPointerCancel={(event) => endCanvasGesture(event)}
                   />
                 )}
               </div>
@@ -860,12 +987,19 @@ export function BeadStudio() {
                 <div><small>当前颜色</small><b>{PALETTE[selectedColor]?.code} · {PALETTE[selectedColor]?.name}</b></div>
               </div>
               <div className="view-toggles">
-                <label><input type="checkbox" checked={showCodes} onChange={(event) => setShowCodes(event.target.checked)} /> 色号</label>
+                <label><input type="checkbox" checked={showCodes} onChange={(event) => {
+                  const checked = event.target.checked;
+                  setShowCodes(checked);
+                  if (checked) {
+                    setCanvasZoom((value) => Math.max(150, value));
+                    setInteractionMode("view");
+                  }
+                }} /> 色号</label>
                 <label><input type="checkbox" checked={roundBeads} onChange={(event) => setRoundBeads(event.target.checked)} /> 圆豆</label>
               </div>
             </div>
 
-            <div className="quick-palette" aria-label="画笔颜色">
+            <div className={`quick-palette ${interactionMode === "edit" ? "is-open" : ""}`} aria-label="画笔颜色">
               {counts.slice(0, 16).map(([index]) => (
                 <button key={index} type="button" title={`${PALETTE[index].code} ${PALETTE[index].name}`} className={selectedColor === index ? "active" : ""} style={{ "--swatch": PALETTE[index].hex } as CSSProperties} onClick={() => { setSelectedColor(index); setTool("paint"); }} />
               ))}
@@ -892,10 +1026,16 @@ export function BeadStudio() {
               <button className="text-button save-project" type="button" onClick={exportProject}>保存项目，下次继续</button>
             </div>
           </aside>
+
+          <nav className="mobile-studio-nav" aria-label="手机端操作步骤">
+            <button type="button" className={mobilePanel === "settings" ? "active" : ""} onClick={() => setMobilePanel("settings")}><span>1</span>图片效果</button>
+            <button type="button" className={mobilePanel === "canvas" ? "active" : ""} onClick={() => setMobilePanel("canvas")}><span>2</span>拼豆图纸</button>
+            <button type="button" className={mobilePanel === "export" ? "active" : ""} onClick={() => setMobilePanel("export")}><span>3</span>用色下载</button>
+          </nav>
         </section>
       )}
 
-      <footer><span>豆豆画室 · 为了快乐而做</span><span>打开即用 · 不上传图片</span></footer>
+      <footer><span>豆豆画室 · 为了快乐而做</span><span>图片不上传 · 仅记录匿名访问量</span></footer>
       {dragging && <div className="drop-overlay"><div><span>＋</span><b>松手就开始变豆豆</b></div></div>}
       {toast && <div className="toast" role="status">{toast}</div>}
     </main>
