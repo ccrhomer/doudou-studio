@@ -18,6 +18,7 @@ type Tool = "paint" | "erase" | "pick";
 type InteractionMode = "view" | "edit";
 type MobilePanel = "settings" | "canvas" | "export";
 type BeadCell = number;
+type PatternSource = { width: number; height: number; cells: BeadCell[] };
 
 type PaletteColor = {
   code: string;
@@ -310,6 +311,7 @@ export function BeadStudio() {
   const drawingRef = useRef(false);
   const gestureRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean; pointerType: string } | null>(null);
   const processRequestRef = useRef(0);
+  const patternSourceRef = useRef<PatternSource | null>(null);
   const [sourceUrl, setSourceUrl] = useState("");
   const [sourceName, setSourceName] = useState("我的拼豆");
   const [imageRevision, setImageRevision] = useState(0);
@@ -574,6 +576,7 @@ export function BeadStudio() {
         setGridWidth(project.width);
         setGridHeight(project.height);
         setCells(imported);
+        patternSourceRef.current = { width: project.width, height: project.height, cells: [...imported] };
         setSourceName(project.name ?? "导入的拼豆");
         setSourceUrl("");
         setCompare(false);
@@ -597,6 +600,7 @@ export function BeadStudio() {
       return;
     }
     if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+    patternSourceRef.current = null;
     setProcessing(true);
     setSourceName(file.name.replace(/\.[^.]+$/, "") || "我的拼豆");
     setSourceUrl(URL.createObjectURL(file));
@@ -647,6 +651,7 @@ export function BeadStudio() {
     if (cells[index] === value) return;
     const next = [...cells];
     next[index] = value;
+    patternSourceRef.current = { width: gridWidth, height: gridHeight, cells: [...next] };
     if (commit) pushEdit(next);
     else setCells(next);
   };
@@ -691,6 +696,7 @@ export function BeadStudio() {
     if (!previous) return;
     setFuture((items) => [cells, ...items].slice(0, 30));
     setCells(previous);
+    patternSourceRef.current = { width: gridWidth, height: gridHeight, cells: [...previous] };
     setHistory((items) => items.slice(0, -1));
   };
 
@@ -699,6 +705,7 @@ export function BeadStudio() {
     if (!next) return;
     setHistory((items) => [...items, cells]);
     setCells(next);
+    patternSourceRef.current = { width: gridWidth, height: gridHeight, cells: [...next] };
     setFuture((items) => items.slice(1));
   };
 
@@ -739,6 +746,7 @@ export function BeadStudio() {
     setGridWidth(demo.width);
     setGridHeight(demo.height);
     setCells(demo.cells);
+    patternSourceRef.current = { width: demo.width, height: demo.height, cells: [...demo.cells] };
     setSourceName("小草莓");
     setSourceUrl("");
     setCompare(false);
@@ -752,7 +760,9 @@ export function BeadStudio() {
   const changeGridWidth = (nextValue: number) => {
     const nextWidth = Math.max(12, Math.min(80, nextValue));
     if (!sourceUrl && cells.length === gridWidth * gridHeight) {
-      const resized = resizePattern(cells, gridWidth, gridHeight, nextWidth);
+      const source = patternSourceRef.current ?? { width: gridWidth, height: gridHeight, cells: [...cells] };
+      patternSourceRef.current ??= source;
+      const resized = resizePattern(source.cells, source.width, source.height, nextWidth);
       setGridWidth(resized.width);
       setGridHeight(resized.height);
       setCells(resized.cells);

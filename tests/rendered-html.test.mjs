@@ -37,6 +37,9 @@ test("keeps mobile editing safe and analytics optional", async () => {
   assert.match(studio, /色块清晰/);
   assert.match(studio, /裁剪并突出主体/);
   assert.match(studio, /mobile-studio-nav/);
+  assert.match(studio, /patternSourceRef/);
+  assert.match(studio, /resizePattern\(source\.cells, source\.width, source\.height, nextWidth\)/);
+  assert.doesNotMatch(studio, /resizePattern\(cells, gridWidth, gridHeight, nextWidth\)/);
   assert.match(css, /\.pattern-canvas\.view-only/);
   assert.match(css, /\.studio\.mobile-settings/);
   assert.match(rum, /reportApiSpeed: false/);
