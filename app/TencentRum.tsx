@@ -12,7 +12,10 @@ declare global {
 export function TencentRum() {
   useEffect(() => {
     const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
-    const id = env?.VITE_TENCENT_RUM_ID?.trim();
+    const isProductionSite =
+      window.location.hostname === "www.321weiqi.com" &&
+      window.location.pathname.startsWith("/doudou");
+    const id = env?.VITE_TENCENT_RUM_ID?.trim() || (isProductionSite ? "aZ6vgcDzYqJYlWo1mR" : "");
     if (!id || window.__doudouRum) return;
 
     const start = () => {

@@ -44,5 +44,7 @@ test("keeps mobile editing safe and analytics optional", async () => {
   assert.match(css, /\.studio\.mobile-settings/);
   assert.match(rum, /reportApiSpeed: false/);
   assert.match(rum, /clickElementLog: false/);
+  assert.match(rum, /window\.location\.hostname === "www\.321weiqi\.com"/);
+  assert.match(rum, /aZ6vgcDzYqJYlWo1mR/);
   assert.match(env, /VITE_TENCENT_RUM_ID=/);
 });
